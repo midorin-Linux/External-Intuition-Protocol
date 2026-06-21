@@ -331,17 +331,99 @@ Agent submission
 | ID生成 | uuid |
 | ログ | tracing |
 
+**構成方針**: Cargo workspace（複数crate）ではなく**単一crate**とし、`src/` 配下をモジュールとして分割する。バイナリは `mcp-server` と `ingestion` の2本を `src/bin/` 配下に置き、ロジック本体は同名モジュールに置いて薄いエントリポイントから呼び出す。
+
 ```
-crates/
-  mcp-server/    # rmcp の tools/resources/prompts、検索パイプラインのオーケストレーション
-  tagging/       # tree-sitter ベースのタグ抽出（取り込み/クエリで共有）
-  storage/       # VectorStore / MetadataStore trait と SQLite 実装
-  verification/  # 機械検証（サンドボックス build/test、OSV照会）
-  judge/         # LLM judge / embedding 呼び出しラッパー
-  ingestion/     # 取り込みバッチ用バイナリ（tagging/verification/storage を再利用）
+External-Intuition-Protocol/
+├─ Cargo.toml                 # 単一crate、[lib] + [[bin]] x2
+├─ rust-toolchain.toml
+├─ planning.md
+│
+├─ src/
+│  ├─ lib.rs                  # モジュール宣言のルート
+│  ├─ bin/
+│  │  ├─ mcp_server.rs        # eip::mcp_server::run() を呼ぶだけ
+│  │  └─ ingestion.rs         # eip::ingestion::run() を呼ぶだけ
+│  │
+│  ├─ core/                   # ドメイン型・trait用の共有型（Entry/Artifact/Tag/Dependency/ScoreRecord等）
+│  │  ├─ mod.rs
+│  │  ├─ model.rs
+│  │  ├─ query.rs             # MustFilter / TagFilter / Hit / EntryView / Meta
+│  │  ├─ facet.rs             # 8軸ファセット enum
+│  │  └─ error.rs
+│  │
+│  ├─ storage/                # VectorStore / MetadataStore trait と SQLite 実装（§7）
+│  │  ├─ mod.rs
+│  │  ├─ traits.rs
+│  │  ├─ sqlite/
+│  │  │  ├─ mod.rs
+│  │  │  ├─ metadata.rs
+│  │  │  ├─ vec.rs
+│  │  │  └─ triggers.rs       # score_history INSERT専用ガード
+│  │  └─ migrations.rs
+│  │
+│  ├─ tagging/                # tree-sitter ベースのタグ抽出（取り込み/クエリで共有）
+│  │  ├─ mod.rs
+│  │  ├─ extract.rs
+│  │  ├─ dependency.rs
+│  │  └─ lang/
+│  │     ├─ mod.rs
+│  │     ├─ rust.rs
+│  │     ├─ python.rs
+│  │     └─ ts.rs
+│  │
+│  ├─ verification/           # 機械検証（サンドボックス build/test、OSV照会）
+│  │  ├─ mod.rs
+│  │  ├─ sandbox.rs
+│  │  ├─ cargo.rs
+│  │  ├─ osv.rs
+│  │  └─ snapshot.rs
+│  │
+│  ├─ judge/                  # LLM judge / embedding 呼び出しラッパー
+│  │  ├─ mod.rs
+│  │  ├─ embedding.rs
+│  │  └─ judge.rs
+│  │
+│  ├─ pipeline/                # 検索パイプライン①〜④のオーケストレーション（§6）
+│  │  ├─ mod.rs
+│  │  ├─ search.rs            # ① hybrid 初期検索
+│  │  ├─ rerank.rs            # ② rerank
+│  │  ├─ evaluate.rs          # ③-a/③-b 評価参照
+│  │  └─ response.rs          # ④ 返答スキーマ（§9）組み立て
+│  │
+│  ├─ mcp_server/             # rmcp の tools/resources/prompts
+│  │  ├─ mod.rs
+│  │  ├─ tools/
+│  │  │  ├─ mod.rs
+│  │  │  ├─ search_code_patterns.rs
+│  │  │  ├─ judge_code_fit.rs
+│  │  │  └─ submit_code_example.rs
+│  │  ├─ resources/
+│  │  │  ├─ mod.rs
+│  │  │  ├─ entry.rs          # code://entry/{id}
+│  │  │  └─ score.rs          # score://entry/{id}
+│  │  └─ prompts/
+│  │     ├─ mod.rs
+│  │     └─ explain_applicability.rs
+│  │
+│  └─ ingestion/              # 取り込みバッチ（tagging/verification/storage を再利用）
+│     ├─ mod.rs
+│     └─ normalize.rs         # データセット → code_artifacts 分解
+│
+├─ migrations/                # SQLファイル群（§4 全テーブル）
+│  ├─ 0001_core_schema.sql
+│  ├─ 0002_tags_deps.sql
+│  ├─ 0003_score_history.sql
+│  └─ 0004_promotion_status.sql
+│
+├─ tests/
+│  └─ fixtures/                # 機械検証の再現に使う実コード（manifest/lockfile/test込み）
+│
+└─ docs/
+   └─ schema.md
 ```
 
-`tagging` を取り込み側とサーバー側で共有することで、格納時とクエリ時のタグ付けの整合性を担保する。
+`tagging` を取り込み側とサーバー側で共有することで、格納時とクエリ時のタグ付けの整合性を担保する。`core` モジュールはどのモジュールからも参照されるため、`core` 自身は他の実装モジュールに依存しない（依存は常に `core` 方向への一方向）。
 
 ---
 
